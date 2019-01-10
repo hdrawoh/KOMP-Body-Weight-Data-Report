@@ -1,1 +1,1 @@
-Writeup at:
+Writeup at:https://howardjhuang.com/komp-project/
