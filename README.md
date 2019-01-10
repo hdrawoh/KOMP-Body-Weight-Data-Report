@@ -1,1 +1,1 @@
-Full writeup at
+Writeup at:
