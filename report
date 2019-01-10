@@ -1,0 +1,1938 @@
+---
+title: "Body Weight Data Report"
+author: "Howard"
+date: "June 27, 2018"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+# Introduction
+
+In this report, I will summarize my findings of KOMP's historical data of mice Body Weight  The data is from measurements from 2012-06-18 to 2017-10-02 on mice that were between 4 and 18 weeks old.  Given somewhat raw data, I will do data exploration and visualization to assess the initial quality of the data and look for data drift or abnormal patterns, then data evaluation to find summary statistics, bootstrap for 2.5% to 97.5% ranges, and complete a power analysis.  
+
+# Data Exploration
+
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+setwd("Z:/Howard/Body weight") ## BCP: not reproducable
+library(plyr)
+library(tidyverse)
+library(kableExtra)
+library(shiny)
+library(ggthemes)
+library(scales)
+library(pwr)
+library(RColorBrewer)
+library(data.table)
+library(ANOVAreplication)
+library(lubridate)
+library(hms)
+library(anytime)
+library(devtools)
+
+
+set.seed(123)
+
+## helper functions
+
+## fix start time
+fixStartTime = function(sT){
+  if(sT == ""){
+    sT = NA
+  }
+  sT %>% as.POSIXct() %>% strftime(format = "%H:%M:%S") %>% as.POSIXct(format = "%H:%M:%S")
+}
+
+```
+
+```{r include=FALSE}
+
+rawData = read.csv("KOMP BODY WEIGHT HISTORICAL DATA.csv") %>%
+  as_tibble()
+
+## Naming Conventions:
+## "JR Number", "Test Date", "Experimenter ID", "Start Time"
+
+mouseData = data_frame(
+  "Unique ID" = seq(1, dim(rawData[,1])[1]),
+  "Mouse ID" = rawData$Mouse.ID,
+  "Date of Birth" = rawData$Date.of.Birth %>% as_date(),
+  "JR Number" = rawData$JR.Number %>% as.factor(), 
+  "Sex" = rawData$Sex,
+  "Strain" = rawData$Strain,
+  "Genotype" = rawData$Genotype,
+  "Room Origin" = rawData$Room.Origin,
+  "Life Status" = rawData$Life.Status,
+  "Exit Reason" = rawData$Exit.Reason,
+  "Date Received" = rawData$Date.Received %>% as_date(),
+  "Date Complete" = rawData$Date.Complete %>% as_date(),
+  "Equipment Manufacturer" = rawData$Equipment.Manufacturer,
+  "Equipment Model" = rawData$Equipment.Model,
+  "Equipment Name" = rawData$Equipment.Name,
+  "Experimenter ID" = rawData$Experimenter.ID,
+  "Test Date" = rawData$Date.of.Test %>% as_date(),
+  "Week" = rawData$Week,
+  "Body Weight" = rawData$Body.Weight %>% as.character() %>% as.double()
+)
+
+mouseData
+
+```
+
+## Data Cleaning
+
+Initial data cleaning was necessary for some variables, and there were some other abnormalities.  
+
+### Mouse.ID
+
+There were a good number of cases where there was a mouse (ID'ed by Mouse ID) that had multiple body weight measurements for a single week.  I first removed all duplicate rows (~200).  There were still 49 cases of non-distinct Mouse ID and Week. Eight of those cases had non duplicate data and were removed.  The remaining cases looked like the week measurement was misidentified as 4 or 18 instead of Week 19, and all occured on 2015-08-10.  These cases were removed.    
+
+```{r include=FALSE}
+
+mouseData = mouseData %>% select(-`Unique ID`) %>% distinct()
+mouseData$`Unique ID` = seq(1, dim(mouseData[,1])[1])
+mouseData = mouseData %>% mutate(sbus = paste0(`Mouse ID`, "|", Week))
+
+duplicateMice = mouseData$`sbus` %>%
+  plyr::count() %>%
+  filter(freq > 1) %>%
+  select(x)
+
+duplicateMouseData = mouseData[mouseData$`sbus` %in% unlist(duplicateMice),]
+
+## Display first 8 cases
+#duplicateMouseData %>% slice(1:8) %>% select(`Mouse ID`)
+
+removes = duplicateMouseData %>%
+  filter(`Test Date` == "2015-08-10") %>%
+  select(`Unique ID`) %>%
+  unlist()
+
+removes = c(removes, duplicateMouseData %>% slice(1:8) %>% select(`Unique ID`) %>% unlist())
+
+mouseData = mouseData[!(mouseData$`Unique ID` %in% removes),]
+
+## BCP: too manual 
+
+```
+
+### Date of Birth
+
+There was one mouse with NA Date of Birth, and now data.  The row was removed.  
+
+```{r include = F}
+
+mouseData = mouseData[!is.na(mouseData$`Date of Birth`),]
+
+```
+
+### JR#, Strain, Genotype
+
+The number of 5304 JR Number, C57BL/6NJ Strain, and Control Genotype mice should all match, since they are the markers for control mice.  However, there are 4 more Control Genotype mice than 5304 JR# and C57BL/6NJ Strain mice.  The 5304 and C57BL/6NJ mice are the same.  All 5304 and C57BL/6NJ mice are marked as Control Genotype. HOwever, there are 13 Control Genotype mice without matching JR Number and Strain, as seen below.  These rows were removed.  
+
+```{r include=FALSE}
+
+#mouseData$Genotype = mouseData$Genotype %>% as.character()
+#mouseData$Genotype[mouseData$Genotype == "NULL"] = "Control"
+#mouseData$Genotype = mouseData$Genotype %>% as.factor()
+
+sss = mouseData %>% 
+  filter(Strain == "C57BL/6NJ") %>%
+  select("Unique ID") %>%
+  unlist()
+
+jss = mouseData %>%
+  filter(`JR Number` == 5304) %>%
+  select("Unique ID") %>%
+  unlist()
+
+gss = mouseData %>%
+  filter(Genotype == "Control") %>%
+  select("Unique ID") %>%
+  unlist()
+
+#sss[!(sss %in% jss)]
+## Strains and JR Numbers match
+
+nmgs = gss[!(gss %in% sss)]
+mouseData[(mouseData$`Unique ID` %in% nmgs),] %>% select(`Mouse ID`, `Date of Birth`, `JR Number`, Strain, Genotype) %>%
+  kable() %>%
+  kable_styling()
+
+nmcs = sss[!(sss %in% gss)]
+#mouseData[(mouseData$`Unique ID` %in% nmcs),]
+
+## rename "" genotypes to Control
+mouseData$Genotype[mouseData$Genotype == ""] = "Control"
+
+mouseData = mouseData[!(mouseData$`Unique ID` %in% nmgs),]
+
+```
+
+### Room Origin
+
+There were 18 mice with NULL Room Origin.  I changed it to NA.
+
+```{r include = F}
+
+mouseData$`Room Origin`[mouseData$`Room Origin` == "NULL"] = NA
+
+```
+
+### Exit Reason
+
+There are 5907 NULL Exit Reasons.  I changed them to NA.  
+
+```{r include=FALSE}
+
+mouseData$`Exit Reason`[mouseData$`Exit Reason` == "NULL"] = NA
+
+```
+
+### Week
+
+There were 3 rows with "Experimenter" in Week.  They had no data and were removed.  
+
+```{r include = F}
+
+mouseData = mouseData %>% filter(!(Week == "Experimenter"))
+
+```
+
+### Body Weight
+
+There were 11 mice with NA Body Weight.  They were removed.  
+
+```{r include = F}
+
+mouseData = mouseData %>% filter(!is.na(`Body Weight`))
+
+```
+
+## Exploratory Analysis
+
+Now that the data has been initially cleaned, it's time to do some exploratory analysis.
+
+```{r include=FALSE}
+
+mouseData$Genotyping = "Mutant"
+mouseData[mouseData$Genotype == "Control",]$Genotyping = "Control"
+mouseData$Genotyping = mouseData$Genotyping %>% as.factor()
+
+abbrData = mouseData %>%
+  select(`Mouse ID`, 
+         
+         Sex, Genotyping, `Experimenter ID`, `Test Date`, `Date of Birth`, `Room Origin`, `Week`, 
+         
+         `Body Weight`
+         
+  )
+
+
+```
+
+### With Shiny
+
+A shiny app was created for an easy way to explore the relationship between the metadata and the data.  Apps are a little slow to display data due to the size of the data, and were not included in the print report.  I used the app for exploratory analysis.  
+
+```{r eval=FALSE, include=FALSE}
+
+## listed here for archival purposes
+
+controlMouseData = abbrData %>% filter(Genotyping == "Control")
+mutantMouseData = abbrData %>% filter(Genotyping == "Mutant")
+femaleData = abbrData %>% filter(Sex == "Female")
+maleData = abbrData %>% filter(Sex == "Male")
+datasets = list(abbrData, controlMouseData, mutantMouseData, femaleData, maleData)
+
+shinyApp(
+  ui = fluidPage(
+    titlePanel("Mouse Data Visualization"),
+    sidebarLayout(
+      sidebarPanel(
+        
+        selectInput("whichData", label = h3("Which dataset:"),
+                    choices = list("All data" = 1,
+                                   "Control mouse data" = 2,
+                                   "Mutant mouse data" = 3,
+                                   "Female mouse data" = 4, 
+                                   "Male mouse data" = 5
+                    ),
+                    selected = 1),
+        
+        selectInput("dependent", label = h3("Variable to Graph:"), 
+                    choices = list(
+                      "T15" = "T15",
+                      "T30" = "T30",
+                      "T60" = "T60",
+                      "T120" = "T120", 
+                      "Full Change" = "Full Change",
+                      "Area under Curve" = "Area under Curve"
+                    ),
+                    selected = 1),
+        
+        selectInput("groupby", label = h3("Group by:"), 
+                    choices = c("Sex", "Genotyping", "Experimenter ID", "Test Date", "Date of Birth", "Start Time", "Room Origin", 
+                                "Body Weight", "Mouse Restrained", "Glucose Injected", "T0"), 
+                    selected = 1),
+        
+        checkboxInput("second_stat", label = "Add second grouping?", value = FALSE),
+        conditionalPanel(
+          "input.second_stat == true",
+          selectInput("second",
+                      label = h3("Second Grouping:"),
+                      choices = c("Sex", "Genotyping", "Experimenter ID", "Test Date", "Date of Birth", "Start Time", "Room Origin", 
+                                "Body Weight", "Mouse Restrained", "Glucose Injected", "T0"), 
+                      selected = 2)
+        )
+        
+      ),
+      mainPanel(
+        plotOutput("plot", width = "100%")
+      )
+    )
+  ),
+  
+  server = function(input, output, session)
+  {
+    output$plot = renderPlot({
+      
+      usedDataset = datasets[[input$whichData %>% as.integer()]]
+      
+      df = usedDataset[,c(input$groupby, input$dependent, input$second)] %>%
+        setNames(c("x","y", "z"))
+      
+      gplot = ggplot(df, aes(x=x, y=y)) +
+        geom_point(alpha = .2, position = "jitter") + 
+        theme_bw() + 
+        theme(plot.title = element_text(hjust = 0.5, size = 22)) + 
+        labs(x = input$groupby, y = input$dependent, title = paste0(input$dependent, " grouped by ", input$groupby)) +
+        geom_smooth(span = .5)
+      
+      if(input$second_stat == TRUE){
+        gplot = gplot + 
+          facet_grid(. ~ z) + 
+          labs(title = paste0(input$dependent, " grouped by ", input$groupby, " and ", input$second))
+      }
+      
+      return(gplot)
+      
+    },
+    
+    height = 800
+    
+    )
+  },
+  
+  options = list(height = 900)
+  
+)
+
+```
+
+### Investigation of Week Interaction with Body Weight
+
+Though there are some outliers, the overall data seems reasonable.  
+
+```{r echo = F, warning = F, message = F}
+
+testData = abbrData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Body Weight` < 75)
+
+ggplot(testData, aes(x = Week, y = `Body Weight`, color = Sex)) + 
+  geom_boxplot(alpha = .2) + 
+  theme_bw() + 
+  ggtitle("Boxplots of Body Weight over Week",
+          subtitle = "Body weight over week overall behaves as expected.") + 
+  labs(caption = "*data from control mice")
+
+```
+
+(One Body Weight data point >75 was removed for illustrative effect)
+
+One thing that seems strange to me is that mouse weight has a slight decrease in week 18.  
+
+Let's seperate and visualize individual mice growth:
+
+```{r echo = F, warning = F, message = F}
+
+testData = abbrData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Body Weight` < 75)
+
+ggplot(testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = .03) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Body Weight over Week",
+          subtitle = "Body weight over week has a drop off at week 18.") + 
+  geom_smooth(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .7) + 
+  xlab("Week") + 
+  labs(caption = "*data from control mice")
+
+```
+
+(One Body Weight data point >75 was removed for illustrative effect)
+
+There's a strange dropoff in week 18.  
+
+Let's seperate the mice that had measurements on week 18 with the rest of the mice.
+
+```{r echo=F, warning = F, message = F}
+
+## Creating a dataset for only mice that were measured in week 18
+
+week18Mice = abbrData %>% 
+  filter(Genotyping == "Control") %>% 
+  filter(Week == "18") %>%
+  select(`Mouse ID`) %>%
+  unlist()
+
+week18MouseData = abbrData %>%
+  filter(`Mouse ID` %in% week18Mice)
+
+ggplot(week18MouseData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = 0.015) + 
+  theme_bw() + 
+  ggtitle("Body Weight over Week",
+          subtitle = "Body weight over week for control mice that were measured on week 18, seperated by sex") + 
+  geom_smooth(data = week18MouseData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6) + 
+  xlab("Week")
+
+## Plotting week 18 mice with the rest of the mice
+
+nweek18MouseData = abbrData %>%
+  filter(!(`Mouse ID` %in% week18Mice)) %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Body Weight` < 75)
+
+testData = nweek18MouseData
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = 0.015) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Body Weight over Week",
+          subtitle = "Seperating mice that had measurements in week 18, they consistenly had lower body weight.") + 
+  stat_smooth(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6, fullrange = F) + 
+  geom_line(data = week18MouseData, 
+            aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`), 
+            inherit.aes = F, alpha = 0.015) + 
+  geom_smooth(data = week18MouseData, 
+              aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6) + 
+  xlab("Week") + 
+  labs(caption = "*data from control mice")
+
+
+```
+
+(One Body Weight data point >75 was removed for illustrative effect)
+
+Somehow, the mice that had measurements in week 18 have lower body weight throughout their life.  
+
+Let's look at mutant mice:
+
+```{r echo=F, warning = F, message = F}
+
+## Creating a dataset for only mice that were measured in week 18
+
+week18mMice = abbrData %>% 
+  filter(Genotyping == "Mutant") %>% 
+  filter(Week == "18") %>%
+  select(`Mouse ID`) %>%
+  unlist()
+
+week18mMouseData = abbrData %>%
+  filter(`Mouse ID` %in% week18mMice)
+
+ggplot(week18mMouseData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = 0.015) + 
+  theme_bw() + 
+  ggtitle("Body Weight over Week",
+          subtitle = "Body weight over week for mutant mice that were measured on week 18, seperated by sex") + 
+  geom_smooth(data = week18mMouseData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6) + 
+  xlab("Week")
+
+## Plotting week 18 mice with the rest of the mice
+
+nweek18mMouseData = abbrData %>%
+  filter(!(`Mouse ID` %in% week18mMice)) %>%
+  filter(Genotyping == "Mutant") %>%
+  filter(`Body Weight` < 75)
+
+testData = nweek18mMouseData
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = 0.005) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Body Weight over Week",
+          subtitle = "Week 18 measured mutant mice also have lower body weight.") + 
+  stat_smooth(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6, fullrange = F) + 
+  geom_line(data = week18mMouseData, 
+            aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex, group = `Mouse ID`), 
+            inherit.aes = F, alpha = 0.005) + 
+  geom_smooth(data = week18mMouseData, 
+              aes(x = Week %>% as.character() %>% as.integer(), y = `Body Weight`, color = Sex), 
+              inherit.aes = F, alpha = .6) + 
+  xlab("Week") + 
+  labs(caption = "*data from mutant mice")
+
+
+```
+
+(One Body Weight data point >75 was removed for illustrative effect)
+
+Mutant mice show the same trend.  
+
+#### Weekly Change
+
+Let's look at how the mice's body weight changes weekly.  
+
+```{r echo = F}
+
+nfData = abbrData %>%
+  select(-`Test Date`) %>% 
+  select(-`Experimenter ID`) %>%
+  spread(Week, `Body Weight`)
+
+colnames(nfData) = c("Mouse ID", "Sex", "Genotyping", "Date of Birth", "Room Origin", "W04", "W05", "W06", "W07", "W08", "W09", "W10", "W11", "W12", "W13", "W14", "W15", "W16", "W17", "W18")
+
+nfData = nfData %>% 
+  mutate("04" = W05 - W04) %>%
+  mutate("05" = W06 - W05) %>%
+  mutate("06" = W07 - W06) %>%
+  mutate("07" = W08 - W07) %>%
+  mutate("08" = W09 - W08) %>%
+  mutate("09" = W10 - W09) %>%
+  mutate("10" = W11 - W10) %>%
+  mutate("11" = W12 - W11) %>%
+  mutate("12" = W13 - W12) %>%
+  mutate("13" = W14 - W13) %>%
+  mutate("14" = W15 - W14) %>%
+  mutate("15" = W16 - W15) %>%
+  mutate("16" = W17 - W16) %>%
+  mutate("17" = W18 - W17) %>%
+  select(`Mouse ID`, Sex, Genotyping, `Date of Birth`, `Room Origin`, 
+         "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17") %>%
+  gather(`04`, `05`, `06`, `07`, `08`, `09`, `10`, `11`, `12`, `13`, `14`, `15`, `16`, `17`,
+         key = "Week Change", value = "Change")
+  
+
+```
+
+```{r echo = F, warning = F, message = F}
+
+testData = nfData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Change` < 60)
+
+ggplot(testData, aes(x = `Week Change`, y = `Change`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = .3) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Weight Change over Week",
+          subtitle = "Body weight change over week for control mice, seperated by sex") + 
+  geom_smooth(data = testData, aes(x = `Week Change`, y = `Change`, color = Sex, group = Sex), 
+              inherit.aes = F, alpha = .7, size = 2) + 
+  xlab("Week")
+
+```
+
+(One Change data point >60 was removed for illustrative effect)
+
+It may be more meaningful to look at the change in terms of percent to the next week.  
+
+```{r include = F}
+
+pcData = abbrData %>%
+  select(-`Test Date`) %>% 
+  select(-`Experimenter ID`) %>%
+  spread(Week, `Body Weight`)
+
+colnames(pcData) = c("Mouse ID", "Sex", "Genotyping", "Date of Birth", "Room Origin", "W04", "W05", "W06", "W07", "W08", "W09", "W10", "W11", "W12", "W13", "W14", "W15", "W16", "W17", "W18")
+
+pcData = pcData %>% 
+  mutate("04" = (W05 - W04) / W04 * 100) %>%
+  mutate("05" = (W06 - W05) / W05 * 100) %>%
+  mutate("06" = (W07 - W06) / W06 * 100) %>%
+  mutate("07" = (W08 - W07) / W07 * 100) %>%
+  mutate("08" = (W09 - W08) / W08 * 100) %>%
+  mutate("09" = (W10 - W09) / W09 * 100) %>%
+  mutate("10" = (W11 - W10) / W10 * 100) %>%
+  mutate("11" = (W12 - W11) / W11 * 100) %>%
+  mutate("12" = (W13 - W12) / W12 * 100) %>%
+  mutate("13" = (W14 - W13) / W13 * 100) %>%
+  mutate("14" = (W15 - W14) / W14 * 100) %>%
+  mutate("15" = (W16 - W15) / W15 * 100) %>%
+  mutate("16" = (W17 - W16) / W16 * 100) %>%
+  mutate("17" = (W18 - W17) / W17 * 100) %>%
+  select(`Mouse ID`, Sex, Genotyping, `Date of Birth`, `Room Origin`, 
+         "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17") %>%
+  gather(`04`, `05`, `06`, `07`, `08`, `09`, `10`, `11`, `12`, `13`, `14`, `15`, `16`, `17`,
+         key = "Week", value = "Percent Change")
+
+```
+
+```{r echo = F, warning = F, message = F}
+
+testData = pcData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Percent Change` < 200)
+
+ggplot(testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = .3) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Percent Weight Change over Week",
+          subtitle = "Percent body weight change over week sees some outliers, but is relatively well behaved.") + 
+  geom_smooth(data = testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = Sex), 
+              inherit.aes = F, alpha = .7, size = 2) + 
+  xlab("Week") + 
+  theme(legend.position = "none") + 
+  labs(caption = ("*data from control mice"))
+
+```
+
+```{r echo=FALSE, warning = F, message = F}
+
+pcwrData = pcData %>% 
+  group_by(Week) %>%
+  mutate(Low = quantile(`Percent Change`, probs = 0.025, na.rm = TRUE)) %>%
+  mutate(High = quantile(`Percent Change`, probs = 0.975, na.rm = TRUE)) %>%
+  ungroup()
+
+testData = pcData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Percent Change` < 200)
+
+ggplot(testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = .3) + 
+  theme_bw() + 
+  ggtitle("Individual Mouse Percent Weight Change over Week",
+          subtitle = "Percent body weight change over week with 2.5% and 97.5% indicators.") + 
+  #geom_smooth(data = testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = Sex), 
+  #            inherit.aes = F, alpha = .7, size = 2) + 
+  xlab("Week") + 
+  facet_grid(Sex ~ .) + 
+  geom_smooth(data = pcwrData, aes(x = `Week`, y = `High`, color = Sex, group = Sex),
+              inherit.aes = F, alpha = .7, size = .3, color = "black") + 
+  geom_smooth(data = pcwrData, aes(x = `Week`, y = `Low`, color = Sex, group = Sex),
+              inherit.aes = F, alpha = .7, size = .3, color = "black") + 
+  #geom_hline(aes(yintercept = 0)) + 
+  theme(legend.position = "none")
+
+
+```
+
+(One Percent Change value > 200 was removed for illustrative effect)
+
+
+### Comparison with jax.org Data
+
+We can compare the experimental data with body weight data for strain C57BL/6NJ, though the Jax data is limited to weeks 4 - 8 and only contains 20 mice per week.  
+
+```{r echo=F, message=FALSE, warning=FALSE}
+
+fcData = abbrData %>%
+  filter(Sex == "Female") %>%
+  filter(Genotyping == "Control") %>%
+  select(Sex, Week, `Body Weight`)
+
+mcData = abbrData %>%
+  filter(Sex == "Male") %>%
+  filter(Genotyping == "Control") %>%
+  select(Sex, Week, `Body Weight`)
+
+fmeans = fcData %>% 
+  group_by(Week) %>%
+  summarise(Mean = mean(`Body Weight`))
+
+fsds = fcData %>% 
+  group_by(Week) %>%
+  summarise(Sd = sd(`Body Weight`))
+
+fmd = left_join(fmeans, fsds)
+fmd$Sex = "Female"
+fmd$Se = fmd$Sd/sqrt(1000)
+
+mmeans = mcData %>% 
+  group_by(Week) %>%
+  summarise(Mean = mean(`Body Weight`))
+
+msds = mcData %>% 
+  group_by(Week) %>%
+  summarise(Sd = sd(`Body Weight`))
+
+mmd = left_join(mmeans, msds)
+mmd$Sex = "Male"
+mmd$Se = mmd$Sd/sqrt(1000)
+
+ours = bind_rows(fmd,mmd)
+ours$Strain = "E|C57BL/6NJ"
+
+bds = data_frame(
+  "Week" = c("04", "05", "06", "07", "08",
+             "04", "05", "06", "07", "08"),
+  "Mean" = c(14.81, 16.66, 17.49, 18.20, 18.73, 
+             15.49, 20.05, 22.53, 24.05, 25.07),
+  "Sd"   = c(1.59, 1.36, 0.17, 1.05, 1.01,
+             1.93, 1.28, 0.95, 1.60, 0.97),
+  "Sex" = c("Female", "Female", "Female", "Female", "Female",
+            "Male", "Male", "Male", "Male", "Male"),
+  "Strain" = "J|C57BL/6NJ"
+)
+bds$Se = bds$Sd/sqrt(10)
+
+ads = data_frame(
+  "Week" = c("04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18",
+             "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18"),
+  "Mean" = c(14.1, 16.9, 17.5, 18.2, 18.7, 19.3, 19.8, 20.2, 20.7, 21.7, 22.0, 22.3, 22.6, 22.6, 23.0, 
+             15.7, 19.4, 21.1, 22.9, 24.0, 25.0, 25.6, 26.7, 27.7, 28.4, 29.1, 29.7, 30.1, 30.7, 31.1),
+  "Sd"   = c(1.80, 1.20, 1.00, 1.10, 1.20, 1.20, 1.30, 1.40, 1.40, 1.50, 1.60, 1.70, 1.80, 2.00, 2.10,
+             2.20, 1.80, 1.50, 1.50, 1.50, 1.60, 1.70, 1.70, 1.70, 1.90, 1.90, 2.20, 2.10, 2.20, 2.30),
+  "Sex" = c("Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male"),
+  "Strain" = "J|C57BL/6J"
+)
+ads$Se = ads$Sd/sqrt(200)
+
+
+summaries = bind_rows(ours, ads)
+
+summs2 = bind_rows(ours, bds)
+
+```
+
+```{r echo = F, warning = F, message = F}
+
+ggplot(data = summs2, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, color = Sex, shape = Strain)) + 
+  geom_line(size = 2) + 
+  theme_bw() + 
+  facet_grid(~Strain) + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Body Weight over Week", 
+          subtitle = "Body weight by week for control mice, seperated by sex and faceted by strain")
+
+```
+
+The weights for the data from jax.org seem to be slightly different.  Let's plot them with SD and SE bars.  
+
+```{r echo = F, warning = F, message = F}
+
+testData = summs2 %>% filter(Sex == "Female")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#F75951", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) +
+  geom_errorbar(aes(ymin = Mean - Sd, ymax = Mean + Sd)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Female Body Weight over Week", 
+          subtitle = "Body weight by week for female control mice, faceted by strain with SD error bars")
+
+testData = summs2 %>% filter(Sex == "Male")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#34CDD1", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) +
+  geom_errorbar(aes(ymin = Mean - Sd, ymax = Mean + Sd)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Male Body Weight over Week", 
+          subtitle = "Body weight by week for male control mice, faceted by strain with SD error bars")
+
+
+
+testData = summs2 %>% filter(Sex == "Female")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#F75951", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain), size = 3) +
+  geom_errorbar(aes(ymin = Mean - Se, ymax = Mean + Se)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Female Body Weight over Week with SE Bars", 
+          subtitle = "KOMP experimental mice have consistently lower body weight.") + 
+  labs(caption = "*data from female control mice")
+
+testData = summs2 %>% filter(Sex == "Male")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#34CDD1", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain), size = 3) +
+  geom_errorbar(aes(ymin = Mean - Se, ymax = Mean + Se)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Male Body Weight over Week with SE Bars", 
+          subtitle = "KOMP experimental mice have consistently lower body weight.") + 
+  labs(caption = "*data from male control mice")
+
+```
+
+We can also plot data for the C57BL/6J strain.  Even though it is a different strain, jax.org has data on body weight for 400-500 mice per week and has data from week 4 to 18.  
+
+```{r echo = F, warning = F, message = F}
+
+ggplot(data = summaries, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, color = Sex, shape = Strain)) + 
+  geom_line(size = 2) + 
+  theme_bw() + 
+  facet_grid(~Strain) + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Body Weight over Week", 
+          subtitle = "Body weight by week for control mice, seperated by sex and faceted by strain")
+
+```
+
+
+
+```{r echo = F, warning = F, message = F}
+
+testData = summaries %>% filter(Sex == "Female")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#F75951", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) +
+  geom_errorbar(aes(ymin = Mean - Sd, ymax = Mean + Sd)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Female Body Weight over Week", 
+          subtitle = "Body weight by week for female control mice, faceted by strain with SD error bars")
+
+testData = summaries %>% filter(Sex == "Male")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#34CDD1", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) +
+  geom_errorbar(aes(ymin = Mean - Sd, ymax = Mean + Sd)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Male Body Weight over Week", 
+          subtitle = "Body weight by week for male control mice, faceted by strain with SD error bars")
+
+
+
+testData = summaries %>% filter(Sex == "Female")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#F75951", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain), size = 3) +
+  geom_errorbar(aes(ymin = Mean - Se, ymax = Mean + Se)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Female Body Weight over Week with SE Bars", 
+          subtitle = "KOMP experimental mice have consistently lower body weight.") + 
+  labs(caption = "*data from female control mice")
+
+testData = summaries %>% filter(Sex == "Male")
+
+ggplot(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain)) + 
+  geom_line(color = "#34CDD1", size = 2) + 
+  geom_point(data = testData, aes(x = Week %>% as.character() %>% as.integer(), y = Mean, shape = Strain), size = 3) +
+  geom_errorbar(aes(ymin = Mean - Se, ymax = Mean + Se)) + 
+  theme_bw() + 
+  xlab("Week") + 
+  ylab("Body Weight") + 
+  ggtitle("Male Body Weight over Week with SE Bars", 
+          subtitle = "KOMP experimental mice have consistenly lower body weight.") + 
+  labs(caption = "*data from male control mice")
+
+```
+
+Again, our experimental data seems to have lower body weight than what is listed on jax.org.  This may be due to the fact that experimental mice are undergoing weekly tests, and the stress causes a decreased body weight.  
+
+Let's look again at percent body weight change, this time including the values for J|C57BL/6NJ
+
+```{r echo = F, warning = F, message = F}
+
+## to get pecent change values:
+#dfsa = c(14.1, 16.9, 17.5, 18.2, 18.7, 19.3, 19.8, 20.2, 20.7, 21.7, 22.0, 22.3, 22.6, 22.6, 23.0, 
+#         15.7, 19.4, 21.1, 22.9, 24.0, 25.0, 25.6, 26.7, 27.7, 28.4, 29.1, 29.7, 30.1, 30.7, 31.1)
+#for(i in 2:15){print((dfsa[i]-dfsa[i-1])/dfsa[i-1]*100)}
+#for(i in 17:30){print((dfsa[i]-dfsa[i-1])/dfsa[i-1]*100)}
+
+pcjData = data_frame(
+  "Week" = c("04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17",
+             "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17"),
+  "Percent Change" = c(19.86, 3.55, 4.00, 2.75, 3.21, 2.59, 2.02, 2.48, 4.83, 1.38, 1.36, 1.35, 0.00, 1.77,
+                       23.57, 8.76, 8.53, 4.80, 1.37, 2.40, 4.30, 3.74, 2.53, 2.46, 2.06, 1.35, 1.99, 1.30),
+  "Sex" = c("Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", "Female", 
+    "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male", "Male")
+)
+
+pcwrData = pcData %>% 
+  group_by(Week) %>%
+  mutate(Low = quantile(`Percent Change`, probs = 0.025, na.rm = TRUE)) %>%
+  mutate(High = quantile(`Percent Change`, probs = 0.975, na.rm = TRUE)) %>%
+  ungroup()
+
+testData = pcData %>%
+  filter(Genotyping == "Control") %>%
+  filter(`Percent Change` < 200)
+
+ggplot(testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = `Mouse ID`)) + 
+  geom_line(alpha = .3) + 
+  theme_bw() + 
+  ggtitle("Percent Change over Week with J|C57BL/6J Indicators",
+          subtitle = "KOMP experimental mice have similar rate of growth to Jax|C57BL/6J") + 
+  #geom_smooth(data = testData, aes(x = `Week`, y = `Percent Change`, color = Sex, group = Sex), 
+  #            inherit.aes = F, alpha = .7, size = 2) + 
+  xlab("Week") + 
+  facet_grid(Sex ~ .) + 
+  geom_smooth(data = pcwrData, aes(x = `Week`, y = `High`, color = Sex, group = Sex),
+              inherit.aes = F, alpha = .7, size = .3, color = "black") + 
+  geom_smooth(data = pcwrData, aes(x = `Week`, y = `Low`, color = Sex, group = Sex),
+              inherit.aes = F, alpha = .7, size = .3, color = "black") + 
+  #geom_hline(aes(yintercept = 0)) + 
+  theme(legend.position = "none") + 
+  geom_point(data = pcjData, aes(x = `Week`, y = `Percent Change`, color = Sex), inherit.aes = F, color = "black") + 
+  labs(caption = "*data from control mice")
+
+```
+
+It looks very similar.  
+
+### Other Observations
+
+```{r echo = F, warning = F, message= F}
+
+testData = week18MouseData %>%
+  filter(Week == "05") %>%
+  filter(Genotyping == "Control")
+
+testData2 = nweek18MouseData %>%
+  filter(Week == "05") %>%
+  filter(Genotyping == "Control")
+
+ggplot(testData2, aes(x = `Test Date`, y = `Body Weight`)) + 
+  geom_point(color = "black") + 
+  geom_point(data = testData, aes(x = `Test Date`, y = `Body Weight`), color = "red", inherit.aes = F) + 
+  theme_bw() + 
+  ggtitle("Body Weight at Week 5 over Test Date", 
+          subtitle = "Week 18 mice are 5 weeks old between 2013 and mid-2016.") + 
+  #facet_wrap(~Sex) + 
+  labs(caption = "*data from control mice")
+
+
+```
+
+```{r echo = F, warning = F, message= F}
+
+testData = week18MouseData %>%
+  filter(Week == "17") %>%
+  filter(Genotyping == "Control")
+
+testData2 = nweek18MouseData %>%
+  filter(Week == "17") %>%
+  filter(Genotyping == "Control")
+
+ggplot(testData2, aes(x = `Test Date`, y = `Body Weight`)) + 
+  geom_point(color = "black", alpha = .5) + 
+  geom_point(data = testData, aes(x = `Test Date`, y = `Body Weight`), color = "red", inherit.aes = F, alpha = .5) + 
+  theme_bw() + 
+  ggtitle("Body Weight at Week 17 over Test Date", 
+          subtitle = "Week 18 mice are 17 weeks old between 2013 and mid-2016.") + 
+  #facet_wrap(~Sex) + 
+  labs(caption = "*data from control mice")
+
+
+```
+
+Body weight by experimenter:
+
+```{r echo = F, warning = F, message= F}
+
+testData = abbrData %>%
+  filter(Genotyping == "Control") %>% 
+  filter(`Body Weight` < 75)
+
+ggplot(testData, aes(x = `Experimenter ID`, y = `Body Weight`)) + 
+  geom_boxplot() + 
+  theme_bw() + 
+  ggtitle("Body Weight over Experimenter ID",
+          subtitle = "Body weights by experimenter")
+
+ggplot(testData, aes(x = `Experimenter ID`, y = `Body Weight`)) + 
+  geom_boxplot() + 
+  facet_wrap(~Week) + 
+  theme_bw() + 
+  ggtitle("Body Weight over Experimenter ID",
+          subtitle = "Body weights by experimenter, faceted by week")
+
+```
+
+Test date over date of birth:
+
+```{r echo=FALSE, warning = F, message = F}
+
+testData = abbrData
+
+ggplot(testData, aes(x = `Date of Birth`, y = `Test Date`)) + 
+  geom_point() + 
+  theme_bw() + 
+  facet_wrap(~Week) + 
+  ggtitle("Test Date over Date of Birth",
+          subtitle = "Test date over date of birth, faceted by week")
+
+```
+
+Week 4 and 17 over Test Date:
+
+```{r echo=F, message=FALSE, warning=FALSE}
+
+testData = abbrData %>%
+  filter(Week == "04") %>%
+  filter(Genotyping == "Control")
+
+ggplot(testData, aes(x = `Test Date`, y = `Body Weight`, color = `Room Origin`)) + 
+  geom_point() + 
+  theme_bw() + 
+  ggtitle("Body Weight at Week 4 over Test Date", 
+          subtitle = "Trend to body weight over test date that is reflected in other experiments") + 
+  facet_wrap(~Sex) + 
+  labs(caption = "*data from control mice")
+
+testData = abbrData %>%
+  filter(Week == "17") %>%
+  filter(Genotyping == "Control")
+
+ggplot(testData, aes(x = `Test Date`, y = `Body Weight`, color = `Room Origin`)) + 
+  geom_point() + 
+  theme_bw() + 
+  ggtitle("Body Weight at Week 17 over Test Date", 
+          subtitle = "Trend to body weight over test date that is reflected in other experiments") + 
+  facet_wrap(~Sex) + 
+  labs(caption = "*data from control mice")
+
+```
+
+There may be some effect of experimenter or room origin on weight measurement.  
+
+# Data Analysis
+
+After some intial data cleaning, we can perform some analysis on the data.  
+
+## Summary Statistics
+
+```{r include=FALSE}
+
+## function that does summary statistics
+## input: data frame (with Genotyping, Sex, and variable of interest), variable of interest
+## output: kable table with mean, median, standard deviation, 2.5% and 97.5% quantiles, and coefficient of variation
+
+h.summary.stats = function(data, variable){
+  
+  fchpData = data %>%
+    filter(Genotyping == "Control") %>%
+    filter(Sex == "Female") %>%
+    .[,c(variable)] %>%
+    filter(!is.na(get(variable))) %>%    
+    unlist()
+  
+  mchpData = data %>%
+    filter(Genotyping == "Control") %>%
+    filter(Sex == "Male") %>%
+    .[,c(variable)] %>%
+    filter(!is.na(get(variable))) %>%
+    unlist()
+  
+  data_frame(
+    "Data" = c(paste0("Female Control ", variable), paste0("Male Control ", variable)),
+    "Mean" = list(fchpData, mchpData) %>% map(mean) %>% unlist() %>% round(digits = 2), 
+    "Median" = list(fchpData, mchpData) %>% map(median) %>% unlist() %>% round(digits = 2),
+    "Standard Deviation" = list(fchpData, mchpData) %>% map(sd) %>% unlist() %>% round(digits = 2),
+    "2.5%" = list(fchpData, mchpData) %>% map(quantile, probs = c(.025), na.rm = TRUE) %>% unlist() %>% round(digits = 0),
+    "97.5%" = list(fchpData, mchpData) %>% map(quantile, probs = c(.975), na.rm = TRUE) %>% unlist() %>% round(digits = 0),
+    "Coefficient of Variation" = list(fchpData, mchpData) %>% map(~sd(.)/mean(.)*100) %>% unlist() %>% round(digits = 2) %>%  paste0("%")
+  ) %>%
+    kable() %>%
+    kable_styling()
+  
+}
+
+```
+
+### Week 4 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "04"), "Body Weight")
+
+```
+
+### Week 5 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "05"), "Body Weight")
+
+```
+
+### Week 6 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "06"), "Body Weight")
+
+```
+
+### Week 7 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "07"), "Body Weight")
+
+```
+
+### Week 8 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "08"), "Body Weight")
+
+```
+
+### Week 9 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "09"), "Body Weight")
+
+```
+
+### Week 10 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "10"), "Body Weight")
+
+```
+
+### Week 11 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "11"), "Body Weight")
+
+```
+
+### Week 12 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "12"), "Body Weight")
+
+```
+
+### Week 13 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "13"), "Body Weight")
+
+```
+
+### Week 14 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "14"), "Body Weight")
+
+```
+
+### Week 15 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "15"), "Body Weight")
+
+```
+
+### Week 16 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "16"), "Body Weight")
+
+```
+
+### Week 17 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "17"), "Body Weight")
+
+```
+
+### Week 18 Body Weight
+
+```{r echo=FALSE}
+    
+h.summary.stats(abbrData %>% filter(Week == "18"), "Body Weight")
+
+```
+
+
+## Data Visualization
+
+Basic density graphs showing female and male controls with the range indicators.  
+
+```{r eval=FALSE, include=FALSE}
+
+## Shiny App here for archival purposes and it is a really good app
+
+shinyApp(
+  ui = fluidPage(
+    titlePanel("Mouse Data Visualization"),
+    h4("Plots not on same scale"),
+    sidebarLayout(
+      sidebarPanel(
+        h5("This Shiny app plots a density plot for the historical data of the open field test.  Plots are created for females and males with 2.5% and 97.5% quantiles indicated."),
+        selectInput("whichVariable", label = h3("Which variable:"),
+                    choices = list("Distance Traveled Total" = "Distance Traveled Total",
+                                   "Distance Traveled First Five Minutes" = "Distance Traveled First Five Minutes",
+                                   "Distance Traveled Second Five Minutes" = "Distance Traveled Second Five Minutes",
+                                   "Distance Traveled Third Five Minutes" = "Distance Traveled Third Five Minutes", 
+                                   "Distance Traveled Fourth Five Minutes" = "Distance Traveled Fourth Five Minutes", 
+                                   "Whole Arena Resting Time" = "Whole Arena Resting Time", 
+                                   "Whole Arena Permanence Time" = "Whole Arena Permanence Time", 
+                                   "Periphery Resting Time" = "Periphery Resting Time", 
+                                   "Periphery Permanence Time" = "Periphery Permanence Time", 
+                                   "Center Distance Traveled" = "Center Distance Traveled",
+                                   "Center Permanence Time" = "Center Permanence Time", 
+                                   "Latency to Center Entry" = "Latency to Center Entry"
+                    ),
+                    selected = 1)
+      ),
+      mainPanel(
+        plotOutput("plot1", width = "100%"),
+        plotOutput("plot2", width = "100%"),
+        plotOutput("plot3", width = "100%")
+      )
+    )
+  ),
+  server = function(input, output, session){
+    fqs = reactive({
+      abbrData %>%
+        filter(Sex == "Female") %>%
+        filter(Genotyping == "Control") %>%
+        select(c(input$whichVariable)) %>%
+        unlist() %>%
+        quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+    })
+    mqs = reactive({
+      abbrData %>%
+        filter(Sex == "Male") %>%
+        filter(Genotyping == "Control") %>%
+        select(c(input$whichVariable)) %>%
+        unlist() %>%
+        quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+    })
+    output$plot1 = renderPlot({
+      df = controlMouseData[,c(input$whichVariable, "Sex")] %>%
+        setNames(c("x", "y"))
+      ggplot(df, aes(x = x)) + 
+        geom_density(aes(fill = y), alpha = 0.7) + 
+        theme_bw() + 
+        xlab(c(input$whichVariable)) + 
+        ylab("Density") +
+        ggtitle("Density Plot", subtitle = paste0(c(input$whichVariable), " by sex for control mice"))
+      
+    })
+    output$plot2 = renderPlot({
+      df = femaleData %>% 
+        filter(Genotyping == "Control") %>% 
+        .[,c(input$whichVariable)] %>%
+        setNames(c("x"))
+      ggplot(df, aes(x = x)) + 
+        geom_density(fill = "#FA9F99") + 
+        geom_vline(xintercept = fqs()[1], color = "#F75951", size = 1.5) + 
+        geom_vline(xintercept = fqs()[2], color = "#F75951", size = 1.5) + 
+        theme_bw() + 
+        xlab(c(input$whichVariable)) + 
+        ylab("Density") + 
+        ggtitle("Female Mice Density Plot", 
+                subtitle = paste0(c(input$whichVariable), 
+                                  " with 2.5% (", fqs()[1], ") and 97.5% (", fqs()[2], ") indicator for control mice"))
+    })
+    output$plot3 = renderPlot({
+      df = maleData %>% 
+        filter(Genotyping == "Control") %>% 
+        .[,c(input$whichVariable)] %>%
+        setNames(c("x"))
+      ggplot(df, aes(x = x)) + 
+        geom_density(fill = "#4CD2D6") + 
+        geom_vline(xintercept = mqs()[1], color = "#34CDD1", size = 1.5) + 
+        geom_vline(xintercept = mqs()[2], color = "#34CDD1", size = 1.5) + 
+        theme_bw() + 
+        xlab(c(input$whichVariable)) + 
+        ylab("Density") + 
+        ggtitle("Male Mice Density Plot", 
+                subtitle = paste0(c(input$whichVariable), 
+                                  " with 2.5% (", mqs()[1], ") and 97.5% (", mqs()[2], ") indicator for control mice"))
+    })
+  },
+  options = list(height = 900)
+)
+```
+
+```{r include=FALSE}
+
+## function to give female and male combined, female, and male density plots with 2.5% and 97.5% quantiles
+## input: data frame (with Genotyping, Sex, and variable of interest), variable of interest
+## output: list of 3 plots
+
+h.density.plots = function(data, variable){
+  
+  fqs = data %>% 
+    filter(Sex == "Female") %>%
+    filter(Genotyping == "Control") %>%
+    .[,c(variable)] %>%
+    unlist() %>%
+    quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+  
+  mqs = data %>% 
+    filter(Sex == "Male") %>%
+    filter(Genotyping == "Control") %>%
+    .[,c(variable)] %>%
+    unlist() %>%
+    quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+  
+  df = data %>% 
+    filter(Genotyping == "Control") %>% 
+    .[,c("Sex", variable)] %>%
+    setNames(c("Sex", "voi"))
+  
+  plot1 = ggplot(df, aes(x = voi)) + 
+    geom_density(aes(fill = Sex), alpha = 0.7) + 
+    theme_bw() + 
+    xlab(variable) + 
+    ylab("Density") + 
+    ggtitle("Density Plot", subtitle = paste0(variable," by sex for control mice"))
+  
+  plot2 = ggplot(df %>% filter(Sex == "Female"), aes(x = voi)) + 
+    geom_density(fill = "#FA9F99") + 
+    geom_vline(xintercept = fqs[1], color = "#F75951", size = 1.5) + 
+    geom_vline(xintercept = fqs[2], color = "#F75951", size = 1.5) + 
+    theme_bw() +
+    xlab(variable) + 
+    ylab("Density") + 
+    ggtitle("Female Mice Density Plot", subtitle = paste0(variable, " with 2.5% (",
+                                                          fqs[1], ") and 97.5% (", 
+                                                          fqs[2], ") indicator for control mice"))
+  
+  plot3 = ggplot(df %>% filter(Sex == "Male"), aes(x = voi)) + 
+    geom_density(fill = "#4CD2D6") + 
+    geom_vline(xintercept = mqs[1], color = "#34CDD1", size = 1.5) + 
+    geom_vline(xintercept = mqs[2], color = "#34CDD1", size = 1.5) + 
+    theme_bw() +
+    xlab(variable) + 
+    ylab("Density") + 
+    ggtitle("Male Mice Density Plot", subtitle = paste0(variable, " with 2.5% (",
+                                                        mqs[1], ") and 97.5% (",
+                                                        mqs[2], ") indicator for control mice"))
+  
+  return(list(plot1, plot2, plot3))
+  
+}
+
+```
+
+### Week 4 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "04"), "Body Weight")
+
+```
+
+### Week 5 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "05"), "Body Weight")
+
+```
+
+### Week 6 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "06"), "Body Weight")
+
+```
+
+### Week 7 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "07"), "Body Weight")
+
+```
+
+### Week 8 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "08"), "Body Weight")
+
+```
+
+### Week 9 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "09"), "Body Weight")
+
+```
+
+### Week 10 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "10"), "Body Weight")
+
+```
+
+### Week 11 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "11"), "Body Weight")
+
+```
+
+### Week 12 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "12"), "Body Weight")
+
+```
+
+### Week 13 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "13"), "Body Weight")
+
+```
+
+### Week 14 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "14"), "Body Weight")
+
+```
+
+### Week 15 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "15"), "Body Weight")
+
+```
+
+### Week 16 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "16"), "Body Weight")
+
+```
+
+### Week 17 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "17"), "Body Weight")
+
+```
+
+### Week 18 Body Weight
+
+```{r echo=FALSE}
+    
+h.density.plots(abbrData %>% filter(Week == "18"), "Body Weight")
+
+```
+
+## Bootstrapping
+
+Bootstrapping was done to get an idea of how many samples were necessary to get the 2.5% and 97.% ranges of the complete data set.  
+
+```{r include=FALSE}
+
+## function to give bootstrapping plots for females and males of the variable of interest
+## input: data frame (with Genotyping, Sex, and variable of interest), variable of interest (there are some other default parameters)
+## output: list of 2 plots
+
+h.bootstrap = function(data, variable, iterations = 50, numValues = 150){
+  
+  varoi = variable
+  abbrData = data
+  
+  # set numValues (from 1 to how many mice "sampled") and iterations (how many times each sample number is rerun)
+  #iterations = 100
+  #numValues = 200
+  
+  # create data frames to store sampled values
+  upperRanges = data.frame()
+  lowerRanges = data.frame()
+  
+  # BCP: Same thing repeated
+  
+  fqs = abbrData %>% 
+    filter(Sex == "Female") %>%
+    filter(Genotyping == "Control") %>%
+    .[,c(varoi)] %>%
+    unlist() %>%
+    quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+  
+  mqs = abbrData %>% 
+    filter(Sex == "Male") %>%
+    filter(Genotyping == "Control") %>%
+    .[,c(varoi)] %>%
+    unlist() %>%
+    quantile(probs = c(0.025, 0.975), na.rm = TRUE)
+  
+  ## females
+  
+  # for loop to sample; get 'numValues' sampled 'iterations' times
+  for(j in 1:iterations){
+    for(i in 1:numValues){
+      samples = abbrData %>% 
+        filter(Sex == "Female") %>% 
+        filter(Genotyping == "Control") %>% 
+        .[,c(varoi)] %>%
+        unlist() %>%
+        sample(size = i, replace = FALSE)
+      # for each sample of 'numValues' points, find the 97.5 and 2.5 quartiles
+      upperRanges[j,i] = quantile(samples, probs = .975, na.rm = TRUE)
+      lowerRanges[j,i] = quantile(samples, probs = .025, na.rm = TRUE)
+    }
+  }
+  
+  # create tibble to store tidy data of the means of the results of the samples
+  upperMeans = tibble(
+    samps = 1:numValues,
+    mean = 1:numValues,
+    type = "max"
+  )
+  lowerMeans = tibble(
+    samps = 1:numValues,
+    mean = 1:numValues,
+    type = "min"
+  )
+  
+  # apply function to get the means of each samples for the iterations
+  upperMeans$mean = apply(upperRanges, 2, mean, na.rm = TRUE)
+  lowerMeans$mean = apply(lowerRanges, 2, mean, na.rm = TRUE)
+  
+  # combine tibbles for a tidy dataframe
+  means = rbind(upperMeans, lowerMeans)
+  
+  # visualization
+  plot1 = ggplot(means, aes(x = samps, y = mean, color = type)) + 
+    geom_point() + 
+    geom_hline(yintercept = fqs[1], size = 1) + 
+    geom_hline(yintercept = fqs[2], size = 1) + 
+    theme_bw() + 
+    xlab("Number of Mice in Sample") + 
+    ylab("Minimum and Maximum values") + 
+    ggtitle(paste0("Bootstrapping of Historical Data for ", varoi, " by Female Mice"), 
+            subtitle = "Visualization of what N would yield an approximation of the 
+            2.5% and 97.5% quartiles of the historical data") + 
+    scale_color_manual(values = c("#F5483F", "#FCB6B1"))
+  
+  ## males
+  
+  for(j in 1:iterations){
+    for(i in 1:numValues){
+      samples = abbrData %>% 
+        filter(Sex == "Male") %>% 
+        filter(Genotyping == "Control") %>% 
+        .[,c(varoi)] %>%
+        unlist() %>%
+        sample(size = i, replace = FALSE)
+      upperRanges[j,i] = quantile(samples, probs = .975, na.rm = TRUE)
+      lowerRanges[j,i] = quantile(samples, probs = .025, na.rm = TRUE)
+    }
+  }
+  upperMeans = tibble(
+    samps = 1:numValues,
+    mean = 1:numValues,
+    type = "max"
+  )
+  lowerMeans = tibble(
+    samps = 1:numValues,
+    mean = 1:numValues,
+    type = "min"
+  )
+  upperMeans$mean = apply(upperRanges, 2, mean, na.rm = TRUE)
+  lowerMeans$mean = apply(lowerRanges, 2, mean, na.rm = TRUE)
+  means = rbind(upperMeans, lowerMeans)
+  plot2 = ggplot(means, aes(x = samps, y = mean, color = type)) + 
+    geom_point() + 
+    geom_hline(yintercept = mqs[1], size = 1) + 
+    geom_hline(yintercept = mqs[2], size = 1) + 
+    theme_bw() + 
+    xlab("Number of Mice in Sample") + 
+    ylab("Minimum and Maximum values") + 
+    ggtitle(paste0("Bootstrapping of Historical Data for ", varoi, " by Male Mice"), 
+            subtitle = "Visualization of what N would yield an approximation of the 
+            2.5% and 97.5% quartiles of the historical data") + 
+    scale_color_manual(values = c("#2EC2C7","#B5EDEE"))
+  
+  return(list(plot1, plot2))
+  
+}
+
+```
+
+### Week 4 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "04"), "Body Weight")
+
+```
+
+### Week 5 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "05"), "Body Weight")
+
+```
+
+### Week 6 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "06"), "Body Weight")
+
+```
+
+### Week 7 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "07"), "Body Weight")
+
+```
+
+### Week 8 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "08"), "Body Weight")
+
+```
+
+### Week 9 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "09"), "Body Weight")
+
+```
+
+### Week 10 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "10"), "Body Weight")
+
+```
+
+### Week 11 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "11"), "Body Weight")
+
+```
+
+### Week 12 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "12"), "Body Weight")
+
+```
+
+### Week 13 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "13"), "Body Weight")
+
+```
+
+### Week 14 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "14"), "Body Weight")
+
+```
+
+### Week 15 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "15"), "Body Weight")
+
+```
+
+### Week 16 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "16"), "Body Weight")
+
+```
+
+### Week 17 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "17"), "Body Weight")
+
+```
+
+### Week 18 Body Weight
+
+```{r echo=FALSE}
+    
+h.bootstrap(abbrData %>% filter(Week == "18"), "Body Weight")
+
+```
+
+## Power Analysis
+
+Doing a power analysis to determine what effect size (visualized as percent change in mutant mice) creates what power, using the sample mean of the control mice and that the standard deviation for control and knockout mice are the same.  Curves are generated for the variable in question for both females and males.  
+
+```{r include=FALSE}
+
+## function to give power curves plots for females and males of the variable of interest
+## input: data frame (with Genotyping, Sex, and variable of interest), variable of interest (there are some other default parameters)
+## output: list of 2 plots
+
+h.power.analysis = function(data, variable, controlN = 100, mutantN = 8, alpha = 0.05, percentChanges = seq(0, 50, 1), 
+                            sampleSizes = c(10, 25, 50, 75, 100)){
+  
+  varoi = variable
+  abbrData = data
+  
+  # power curve for varoi for females
+  
+  # creating dataset for female control mice
+  femaleControlData = abbrData %>%
+    filter(Sex == "Female") %>%
+    filter(Genotyping == "Control")
+  
+  # setting variables
+  controlMean = mean(femaleControlData %>% .[,c(varoi)] %>% unlist(), na.rm = TRUE)
+  pooledSd = pooled.sd(abbrData %>% filter(Sex == "Female") %>% .[,c(varoi, "Genotyping")] %>% setNames(c("y","g")) %>% 
+                         filter(!is.na(y)))
+  powers = tibble(
+    percentChange = double(),
+    power = double(),
+    samples = double()
+  )
+  
+  # for loop to get every percent change for every sample size
+  for(i in sampleSizes){
+    for(j in percentChanges){
+      mutantMean = controlMean * (j + 100) / 100
+      effectSize = abs(controlMean - mutantMean)/pooledSd
+      presult = pwr.t2n.test(n1 = i, n2 = mutantN, d = effectSize, sig.level = alpha)
+      powers = add_row(powers, percentChange = j, power = presult[5] %>% as.numeric(), samples = i)
+    }
+  }
+  
+  # visualization
+  plot1 = ggplot(powers, aes(x = percentChange, y = power, color = samples)) + 
+    geom_point(aes(y = power)) + 
+    theme_bw() + 
+    xlab("Percent change in mutant mice") + 
+    ylab("Power") + 
+    ggtitle("Power Curves ", 
+            subtitle = paste0("How varying effect size and control sample size affect power for female mice ", varoi)) + 
+    labs(color = "Samples")
+  
+  # power curves for varying Total Hole Pokes for males # BCP: Repeating
+  
+  maleControlData = abbrData %>%
+    filter(Sex == "Male") %>%
+    filter(Genotyping == "Control")
+  controlMean = mean(maleControlData %>% .[,c(varoi)] %>% unlist(), na.rm = TRUE)
+  pooledSd = pooled.sd(abbrData %>% filter(Sex == "Male") %>% .[,c(varoi, "Genotyping")] %>% setNames(c("y","g")) %>%
+                         filter(!is.na(y)))
+  powers = tibble(
+    percentChange = double(),
+    power = double(),
+    samples = double()
+  )
+  for(i in sampleSizes){
+    for(j in percentChanges){
+      mutantMean = controlMean * (j + 100) / 100
+      effectSize = abs(controlMean - mutantMean)/pooledSd
+      presult = pwr.t2n.test(n1 = i, n2 = mutantN, d = effectSize, sig.level = alpha)
+      powers = add_row(powers, percentChange = j, power = presult[5] %>% as.numeric(), samples = i)
+    }
+  }
+  plot2 = ggplot(powers, aes(x = percentChange, y = power, color = (samples))) + 
+    geom_point(aes(y = power)) + 
+    theme_bw() + 
+    xlab("Percent change in mutant mice") + 
+    ylab("Power") + 
+    ggtitle("Power Curves ", 
+            subtitle = paste0("How varying effect size and control sample size affect power for male mice ", varoi)) + 
+    labs(color = "Samples")
+  
+  return(list(plot1, plot2))
+  
+}
+
+```
+
+### Week 4 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "04"), "Body Weight")
+
+```
+
+### Week 5 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "05"), "Body Weight")
+
+```
+
+### Week 6 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "06"), "Body Weight")
+
+```
+
+### Week 7 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "07"), "Body Weight")
+
+```
+
+### Week 8 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "08"), "Body Weight")
+
+```
+
+### Week 9 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "09"), "Body Weight")
+
+```
+
+### Week 10 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "10"), "Body Weight")
+
+```
+
+### Week 11 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "11"), "Body Weight")
+
+```
+
+### Week 12 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "12"), "Body Weight")
+
+```
+
+### Week 13 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "13"), "Body Weight")
+
+```
+
+### Week 14 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "14"), "Body Weight")
+
+```
+
+### Week 15 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "15"), "Body Weight")
+
+```
+
+### Week 16 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "16"), "Body Weight")
+
+```
+
+### Week 17 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "17"), "Body Weight")
+
+```
+
+### Week 18 Body Weight
+
+```{r echo=FALSE}
+    
+h.power.analysis(abbrData %>% filter(Week == "18"), "Body Weight")
+
+```
